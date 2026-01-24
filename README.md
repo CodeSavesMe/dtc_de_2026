@@ -1,29 +1,29 @@
-
 <div align="center">
 
 # NY Taxi Data Ingestion
-### ETL with Docker Compose & PostgreSQL
+### ETL pipeline with Docker Compose + PostgreSQL
 
 <img src="https://img.shields.io/badge/Python-3.13-3776AB?style=flat&logo=python&logoColor=white" alt="Python" />
 <img src="https://img.shields.io/badge/PostgreSQL-16-336791?style=flat&logo=postgresql&logoColor=white" alt="Postgres" />
 <img src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker&logoColor=white" alt="Docker" />
 
 <p>
-Downloads NYC Taxi trip data and loads it into PostgreSQL.
+Downloads NYC Taxi trip data and loads it into PostgreSQL using a staging table and atomic swap.
 </p>
 
 </div>
 
 ---
 
-## What this project does
+## Overview
 
-- Downloads a file from a URL (`.parquet`, `.csv`, `.csv.gz`, `.tsv`)
-- Creates/maintains a destination table in Postgres
-- Loads data into a staging table
-- Validates the staging table
-- Renames staging to the final table name
+- Downloads a file from a URL (`.parquet`, `.csv`, `.csv.gz`, `.tsv`, `.tsv.gz`)
+- Creates or reuses a destination table in Postgres
+- Loads into a staging table, validates, then swaps into the final table
+- Logs to console and `./logs/app.log` with optional tqdm progress bars
+
 ---
+
 ## Pipeline diagram
 
 <div align="center">
@@ -108,6 +108,185 @@ flowchart TD
     O -- No --> Q --> R
 ```
 </div>
+
+---
+
+## Quickstart (Docker Compose)
+
+### 1) Create `.env` in the repo root
+
+```ini
+DB_USER=postgres
+DB_PASSWORD=postgres
+DB_NAME=ny_taxi
+
+DB_HOST=localhost
+DB_PORT=5432
+
+DATA_URL=<DATA_URL>
+
+# optional
+KEEP_LOCAL=true
+PARQUET_BATCH_SIZE=100000
+LOG_LEVEL=INFO
+ENABLE_PROGRESS=true
+```
+---
+
+## Service Management
+
+| **Action**                            | **Command**                                                                                   | **Description**                                                                 |
+| ------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **Start Postgres Service**            | `docker-compose up -d --build db`                                                             | Start only the Postgres service in detached mode and build if necessary.        |
+| **Start App Service**                 | `docker-compose up -d --build app`                                                            | Start the app service (idle by default) in detached mode and build if necessary.|
+| **Run Data Ingestion**                | `docker-compose run --rm app python main.py ingest --url <DATA_URL>`                          | Run the ingestion process. Replace `<DATA_URL>` with the actual URL.            |
+| **Run Ingestion with Table Name**     | `docker-compose run --rm app python main.py ingest --url <DATA_URL> --table-name <TABLE_NAME>`| Override destination table name (optional for all formats).                      |
+| **Stop Services**                     | `docker-compose down`                                                                         | Stop and remove containers, networks, and volumes created by Compose.           |
+| **Stop and Remove All Volumes**       | `docker-compose down -v`                                                                      | Stop and remove containers, networks, and volumes (incl. persistent volumes).   |
+
+---
+
+## CLI Usage
+
+> Note: CLI commands can be run locally (`python main.py ...`) or via Docker Compose (`docker-compose run --rm app python main.py ...`).
+
+| **Action**                                 | **Command**                                                         | **Description**                                                                                          |
+| ------------------------------------------ | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Show All CLI Commands**                  | `python main.py --help`                                             | Show the top-level help for the project, including all available commands.                               |
+| **Show Help for `ingest` Subcommand**      | `python main.py ingest --help`                                      | Show help specific to the `ingest` subcommand for ingestion-related options.                             |
+| **Run Ingestion**                          | `python main.py ingest --url <DATA_URL>`                            | Run the ingestion process by providing the data URL to ingest. Replace `<DATA_URL>` with the actual URL. |
+| **Run Ingestion with Specific Table Name** | `python main.py ingest --url <DATA_URL> --table-name <TABLE_NAME>`  | Override the destination table name. Replace `<TABLE_NAME>` with the actual table name.                  |
+| **Run Ingestion with Schema Option**       | `python main.py --schema analytics ingest --url <DATA_URL>`         | Run ingestion using a specific schema (`analytics`) along with the data URL.                              |
+| **Run Ingestion with Custom Batch Size**   | `python main.py ingest --url <DATA_URL> --parquet-batch-size 50000` | Run ingestion with a specified batch size for Parquet files (e.g., 50000 rows per batch).               |
+| **Run Ingestion with No Local File Keep**  | `python main.py ingest --url <DATA_URL> --no-keep-local`            | Run ingestion and do not keep the downloaded file locally after ingestion.                               |
+
+---
+
+## Configuration
+
+### Environment variables
+
+| Variable | Default     | Description                          |
+| --- |-------------|--------------------------------------|
+| `DB_USER` | `postgres`  | Postgres username                    |
+| `DB_PASSWORD` | `postgres`  | Postgres password                    |
+| `DB_NAME` | `ny_taxi`   | Postgres database name               |
+| `DB_SCHEMA` | `public`    | Schema for tables                    |
+| `DB_HOST` | `localhost` | Postgres host                        |
+| `DB_PORT` | `5432`      | Postgres port                        |
+| `DATA_URL` | *(none)*    | Source file URL                      |
+| `DATA_DIR` | `./data`    | Where downloads are stored           |
+| `KEEP_LOCAL` | `true`      | Keep downloaded file after ingestion |
+| `PARQUET_BATCH_SIZE` | `100000`    | Rows per Parquet batch               |
+| `LOG_LEVEL` | `INFO`      | Console log level                    |
+| `ENABLE_PROGRESS` | `true`      | Enable tqdm progress bars            |
+
+### CLI flags
+
+Global options come before `ingest`:
+
+```bash
+python main.py --schema analytics ingest --url <DATA_URL>
+```
+
+| Flag | Env | Default | Description |
+| --- | --- | --- | --- |
+| `--user` | `DB_USER` | `postgres` | Postgres username |
+| `--password` | `DB_PASSWORD` | `postgres` | Postgres password |
+| `--host` | `DB_HOST` | `localhost` | Postgres host |
+| `--port` | `DB_PORT` | `5432` | Postgres port |
+| `--db` | `DB_NAME` | `ny_taxi` | Postgres database name |
+| `--schema` | `DB_SCHEMA` | `public` | Postgres schema |
+| `--url` | `DATA_URL` | *(none)* | Data file URL |
+| `--table-name` / `--table_name` | *(none)* | *(auto for CSV/Parquet)* | Destination table name |
+| `--keep-local` / `--no-keep-local` | `KEEP_LOCAL` | `true` | Keep downloaded file |
+| `--parquet-batch-size` / `--parquet_batch_size` | `PARQUET_BATCH_SIZE` | `100000` | Rows per Parquet batch |
+
+---
+
+## Table name inference
+
+If `--table-name` is omitted, the name is inferred from the URL filename:
+
+- `.csv`, `.csv.gz`, `.tsv`, `.tsv.gz`, and `.parquet` are stripped
+- `-` is replaced with `_`
+
+Example:
+
+- `green_tripdata_2019-09.parquet` -> `green_tripdata_2019_09`
+
+Notes:
+
+- Table names must be valid identifiers: letters, numbers, and underscores only.
+- Use `--table-name` to override the inferred table name.
+
+---
+
+## Ingestion flow (IngestionPipeline.run)
+
+1. Download file and detect format.
+2. Acquire an advisory lock for `ingest:<table_name>`.
+3. Create the final table if it does not exist (schema inferred from input).
+4. Recreate the staging table from the final table schema.
+5. Load data into staging (Parquet streaming or CSV/TSV COPY).
+6. Validate staging table.
+7. Swap staging into the final table atomically.
+8. Run `ANALYZE` on the final table.
+9. On failure, attempt to drop the staging table and re-raise.
+10. Remove the local file if `keep_local` is `false`.
+
+---
+
+## Validation rules
+
+The validator:
+
+- Fails if staging row count is `0`
+- Tries to find a datetime column (first match wins):
+  - `lpep_pickup_datetime`
+  - `tpep_pickup_datetime`
+  - `pickup_datetime`
+- Records `min_dt`, `max_dt`, and `null_dt` for the datetime column when present
+- If the table name contains `YYYY_MM` (example: `green_tripdata_2019_09`), it checks spillover outside that month
+  - Spillover currently logs a warning (not a hard error)
+
+---
+
+## Logging and progress
+
+- Console logs use `LOG_LEVEL` (default `INFO`).
+- File logs are written to `./logs/app.log` (DEBUG level, rotated at 10MB, kept for 7 days).
+- Progress bars are enabled when `ENABLE_PROGRESS=true` and `tqdm` is installed.
+- Downloads default to `./data` or `DATA_DIR` if set.
+
+---
+
+## Verify the result
+
+```bash
+docker exec -it postgres_db psql -U <DB_USER> -d <DB_NAME>
+```
+
+```sql
+SELECT COUNT(*) FROM public.<TABLE_NAME>;
+```
+
+```sql
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = '<TABLE_NAME>'
+ORDER BY ordinal_position;
+```
+
+---
+
+## Notes and troubleshooting
+
+- The app container uses `tail -f /dev/null` by default, so it stays idle until you run a command.
+- If a file with the same name already exists in `data/`, the downloader skips re-downloading. Delete the file to force a fresh download.
+- The atomic (whole or nothing) download pattern ensures downloads are not left half-written (download to a temp file, then rename on success).
+- In Docker Compose, `.env` is injected into the container environment via `env_file`. The file itself is not mounted into the container.
+
 ---
 
 ## Project structure
@@ -131,347 +310,12 @@ flowchart TD
 ├── logs/         # app logs (mounted to /app/logs)
 ├── ny_data/      # Postgres data directory (bind mount)
 ├── sql/
-├── notebooks/    # planned
-└── tests/        # planned
-
-````
-
----
-
-## Requirements
-
-**Recommended**
-
-* Docker
-* Docker Compose
-
-**Optional (run without Docker)**
-
-* Python >= 3.13
-* `uv`
-* PostgreSQL
-
----
-
-## Quickstart (Docker Compose)
-
-### 1) Create `.env` in the repo root
-
-`docker-compose.yml` loads env vars for `app` via `env_file: .env`.
-
-Example:
-
-```ini
-DB_USER=postgres
-DB_PASSWORD=postgres
-DB_NAME=ny_taxi
-
-DB_HOST=localhost
-DB_PORT=5432
-
-DATA_URL=<DATA_URL>
-
-# optional
-KEEP_LOCAL=true
-PARQUET_BATCH_SIZE=100000
-LOG_LEVEL=INFO
+├── notebooks/
+└── tests/
 ```
-
-### 2) Run
-
-```bash
-docker-compose up --build
-```
-
-This compose file defines:
-
-* Postgres service name: `db` (container_name: `postgres_db`)
-* App service name: `app` (container_name: `ingestion_app`)
-* Network: `dtc-net`
-* Postgres data stored in `./ny_data` (bind mount)
-
-Stop:
-
-```bash
-docker-compose down
-```
-
-Remove containers + reset Postgres data:
-
-```bash
-docker-compose down -v
-```
-
-> Note: The compose file declares a named volume `pgdata`, but the `db` service uses `./ny_data:/var/lib/postgresql/data`.
-
----
-
-## Command cheat sheet
-
-| Action              | Command                                                      |
-| ------------------- | ------------------------------------------------------------ |
-| Start               | `docker-compose up --build`                                  |
-| Stop                | `docker-compose down`                                        |
-| App logs            | `docker-compose logs -f app`                                 |
-| DB logs             | `docker-compose logs -f db`                                  |
-| Open psql           | `docker exec -it postgres_db psql -U <DB_USER> -d <DB_NAME>` |
-| Reset Postgres data | `docker-compose down -v`                                     |
-
----
-
-## CLI usage (main.py)
-
-`main.py` reads defaults from environment variables (including those provided by Docker Compose),
-and you can override any value via flags.
-
-### Flags reference (matches `main.py`)
-
-| Flag                   | Env default used by code | Type    | Default if env is missing    | Description                                           |
-| ---------------------- | ------------------------ | ------- | ---------------------------- | ----------------------------------------------------- |
-| `--user`               | `DB_USER`                | string  | `postgres`                   | Postgres username                                     |
-| `--password`           | `DB_PASSWORD`            | string  | `postgres`                   | Postgres password                                     |
-| `--host`               | `DB_HOST`                | string  | `localhost`                  | Postgres host                                         |
-| `--port`               | `DB_PORT`                | string  | `5432`                       | Postgres port                                         |
-| `--db`                 | `DB_NAME`                | string  | `ny_taxi`                    | Postgres database name                                |
-| `--url`                | `DATA_URL`               | string  | *(none)*                     | Data file URL (`.parquet`, `.csv`, `.csv.gz`, `.tsv`) |
-| `--table_name`         | *(none)*                 | string  | *(auto from URL if omitted)* | Destination table name                                |
-| `--keep_local`         | `KEEP_LOCAL`             | boolean | `true`                       | Keep the downloaded file after ingestion              |
-| `--parquet_batch_size` | `PARQUET_BATCH_SIZE`     | int     | `100000`                     | Rows per Parquet batch when streaming into Postgres   |
-
-### Table name inference (when `--table_name` is omitted)
-
-`main.py` infers the table name from the URL filename by:
-
-* removing `.parquet` / `.csv` / `.csv.gz`
-* replacing `-` with `_`
-
-Example:
-
-* `green_tripdata_2019-09.parquet` → `green_tripdata_2019_09`
-
-> Note: The current inference function removes `.csv(.gz)` and `.parquet`.
-> If you use a `.tsv` URL, pass `--table_name` explicitly.
-
-### Examples
-
-#### 1) Show help
-
-```bash
-python main.py --help
-```
-
-#### 2) Run using `.env` / environment defaults
-
-```bash
-python main.py
-```
-
-> Requires `DATA_URL` to be set (or pass `--url`).
-
-#### 3) Run with an explicit URL (table name auto-inferred for CSV/Parquet)
-
-```bash
-python main.py --url <DATA_URL>
-```
-
-#### 4) Run with explicit URL + explicit table name (recommended for TSV)
-
-```bash
-python main.py --url <DATA_URL> --table_name <TABLE_NAME>
-```
-
-#### 5) Change Parquet batch size
-
-```bash
-python main.py --url <DATA_URL> --parquet_batch_size 50000
-```
-
-#### 6) Delete the downloaded file after ingestion
-
-```bash
-python main.py --url <DATA_URL> --keep_local false
-```
-
-#### 7) Override Postgres connection settings (useful for local runs)
-
-```bash
-python main.py \
-  --host localhost \
-  --port 5432 \
-  --user <DB_USER> \
-  --password <DB_PASSWORD> \
-  --db <DB_NAME> \
-  --url <DATA_URL>
-```
-
----
-
-## Run the app with arguments (Docker Compose)
-
-The image entrypoint is `python main.py`, so extra args are passed directly:
-
-```bash
-docker-compose run --rm app --url <DATA_URL>
-```
-
-With a table name:
-
-```bash
-docker-compose run --rm app --url <DATA_URL> --table_name <TABLE_NAME>
-```
-
----
-
-## What the pipeline does (IngestionPipeline.run)
-
-**Names**
-
-* Staging table: `<table_name>__staging`
-* Lock key: `ingest:<table_name>`
-
-**Steps**
-
-1. Download the file and detect its type.
-2. Acquire an advisory lock for the destination table.
-3. If the final table does not exist: create it from the file schema.
-4. Recreate the staging table to match the final table schema.
-5. Load into staging:
-
-   * Parquet → streamed in batches (`PARQUET_BATCH_SIZE`)
-   * CSV/CSV.GZ → Postgres `COPY`
-   * TSV → loaded using the TSV loader (tab-delimited)
-6. Validate the staging table.
-7. Rename staging to the final table name.
-8. Run `ANALYZE` on the final table.
-9. On failure: drop the staging table (best effort) and re-raise.
-10. If `keep_local` is `false`: delete the downloaded file (best effort).
-
----
-
-## Validation rules (PostgresStagingValidator)
-
-The validator:
-
-* Fails if staging row count is `0`
-* Tries to find a datetime column using these candidates (first match wins):
-
-  * `lpep_pickup_datetime`
-  * `tpep_pickup_datetime`
-  * `pickup_datetime`
-* If a datetime column exists, it records:
-
-  * `min_dt`, `max_dt`, `null_dt`
-* If the final table name contains `YYYY_MM` (e.g. `green_tripdata_2019_09`), it checks whether
-  `min_dt` and `max_dt` are inside that month.
-
-  * Out-of-range results produce a warning (not a hard error)
-
----
-
-## Verify the result
-
-Open psql:
-
-```bash
-docker exec -it postgres_db psql -U <DB_USER> -d <DB_NAME>
-```
-
-Row count:
-
-```sql
-SELECT COUNT(*) FROM public.<TABLE_NAME>;
-```
-
-Columns:
-
-```sql
-SELECT column_name
-FROM information_schema.columns
-WHERE table_schema='public' AND table_name='<TABLE_NAME>'
-ORDER BY ordinal_position;
-```
-
----
-
-## Run locally (DB still from Docker)
-
-1. Start only Postgres:
-
-```bash
-docker-compose up -d db
-```
-
-2. Install deps:
-
-```bash
-uv sync --frozen
-```
-
-3. Run (set DB env vars, and pass `--url` if needed):
-
-```bash
-export DB_HOST=localhost
-export DB_PORT=5432
-export DB_USER=<DB_USER>
-export DB_PASSWORD=<DB_PASSWORD>
-export DB_NAME=<DB_NAME>
-
-python main.py --url <DATA_URL> --table_name <TABLE_NAME>
-```
-
----
-
-## Logging and folders (config.py)
-
-* Logs are written to:
-
-  * stdout (level from `LOG_LEVEL`, default `INFO`)
-  * `./logs/app.log` (DEBUG level, rotated at 10MB, kept for 7 days)
-* Data directory default:
-
-  * `DATA_DIR` if set
-  * otherwise `./data`
-
----
-
-## Notes about `.env` loading (matches current code)
-
-There are two related `.env` behaviors in this project:
-
-1) **Docker Compose `.env` for variable substitution (host-side)**  
-   This `docker-compose.yml` uses `${DB_USER}`, `${DB_PASSWORD}`, `${DB_NAME}`, and `${DB_PORT}`.  
-   Docker Compose reads the `.env` file in the same directory as the compose file to substitute those values when it parses the file.
-
-2) **`app.env_file: .env` injects environment variables (container-side)**  
-   The `app` service has:
-
-   ```yaml
-   env_file:
-     - .env
-   environment:
-     - DB_HOST=db
-
-This means:
-
-* The `.env` file is used to set environment variables inside the `app` container.
-* `DB_HOST` is explicitly overridden to `db` inside the container.
-* `env_file` loads key/value pairs into the container environment, but it does not copy or mount the `.env` file into the container filesystem.
-
-`main.py` also calls `load_dotenv()` using:
-
-```python
-ENV_PATH = Path(__file__).resolve().parent / ".env"
-load_dotenv(dotenv_path=ENV_PATH)
-```
-
-* **Local run**: `ENV_PATH` points to `./.env` (repo root), so `load_dotenv()` reads the file.
-* **Container run**: `ENV_PATH` points to `/app/.env`. This file is not created by `env_file`, so it may not exist.
-  The script still works because Docker Compose already injects the variables, and `os.getenv(...)` reads them.
-
->**Note**: `load_dotenv()` does not override existing environment variables by default, so values injected by Docker Compose remain in effect.
 
 ---
 
 <div align="center">
-<em>DTC DE 2026 — 01-docker-terraform</em>
+<em>DTC DE 2026 - 01-docker-terraform</em>
 </div>

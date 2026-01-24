@@ -23,30 +23,35 @@ class PostgresSchemaManager(SchemaManager):
     """
     Manages PostgreSQL table schemas based on input files.
 
-    Notes:
-    - Can infer schema from CSV, TSV, or Parquet files.
-    - Supports bootstrapping the final table schema and creating staging tables.
-    - Uses sanitized identifiers to prevent SQL issues.
+    Capabilities:
+    - Infers schema from CSV, TSV, and Parquet files.
+    - Bootstraps final tables and creates staging tables.
+    - Handles dialect differences (e.g., separators) for flat files.
     """
     db: Database
     sample_rows: int = 2000
 
     def ensure_final_schema(self, file_path: str, final_table: str) -> None:
-        # Sanitize table name
+        """
+        Ensures the final destination table exists with the correct schema.
+        Detects file format and delegates to the appropriate bootstrapping method.
+        """
+        # Sanitize table name to prevent SQL injection or syntax errors
         final_table = sanitize_ident(final_table)
 
-        # Detect file format
+        # Detect file format (CSV, TSV, Parquet, etc.)
         fmt = detect_file_format(file_path)
 
         if fmt == FileFormat.PARQUET:
-            # Build schema using Parquet file footer
+            # Parquet files contain schema metadata, so we read the footer
             self._bootstrap_final_schema_from_parquet_footer(file_path, final_table)
             return
 
         if fmt in (FileFormat.CSV, FileFormat.TSV):
-            # Treat TSV as CSV for schema inference using sample rows
+            # For CSV/TSV, we infer schema from sample rows.
+            # CRITICAL: We pass 'fmt' to ensure the correct delimiter is used.
             self._bootstrap_final_schema_from_csv_sample(
-                file_path, final_table, sample_rows=self.sample_rows
+                file_path, final_table, sample_rows=self.sample_rows, fmt=fmt
             )
             return
 
@@ -54,34 +59,60 @@ class PostgresSchemaManager(SchemaManager):
         raise ValueError(f"Unsupported file format for schema bootstrap: {file_path} ({fmt})")
 
     def recreate_staging_like_final(self, final_table: str, staging_table: str) -> None:
-        # Sanitize table names
+        """
+        Drops the staging table (if exists) and creates a new empty one
+        mirroring the structure of the final table.
+        """
         final_table = sanitize_ident(final_table)
         staging_table = sanitize_ident(staging_table)
 
-        # Drop staging table if it exists and create a new one like the final table
         with self.db.begin() as conn:
             conn.execute(text(f"DROP TABLE IF EXISTS {qident(staging_table)}"))
+            # 'INCLUDING ALL' ensures indexes and constraints are copied if needed
             conn.execute(text(f"CREATE TABLE {qident(staging_table)} (LIKE {qident(final_table)} INCLUDING ALL)"))
 
-        # Log completion
         logger.info(f"Created staging <green>{staging_table}</green> LIKE <green>{final_table}</green>")
 
-    def _bootstrap_final_schema_from_csv_sample(self, file_path: str, final_table: str, sample_rows: int) -> None:
-        # Log start of schema bootstrapping
-        logger.info(f"Bootstrapping schema for <green>{final_table}</green> from CSV sample rows={sample_rows}")
+    def _bootstrap_final_schema_from_csv_sample(
+            self,
+            file_path: str,
+            final_table: str,
+            sample_rows: int,
+            fmt: FileFormat = FileFormat.CSV
+    ) -> None:
+        """
+        Infers schema from CSV or TSV sample rows.
 
-        # Read a sample of the CSV and fix datetime columns
-        df = pd.read_csv(file_path, nrows=sample_rows, compression="infer", low_memory=False)
+        Args:
+            fmt: The detected file format. This determines the separator
+                 (',' for CSV, '\t' for TSV) to prevent parsing errors.
+        """
+        logger.info(f"Bootstrapping schema for <green>{final_table}</green> from {fmt.name} sample rows={sample_rows}")
+
+        # specific separator logic to avoid "single column" inference errors
+        separator = "\t" if fmt == FileFormat.TSV else ","
+
+        # Read a sample using the correct separator
+        df = pd.read_csv(
+            file_path,
+            nrows=sample_rows,
+            compression="infer",
+            low_memory=False,
+            sep=separator  # <--- Ensures columns are split correctly
+        )
+
+        # Standardize datetime formats before SQL creation
         df = fix_datetime_columns(df)
 
-        # Create table with inferred schema based on sample
+        # Create table using pandas' SQL utility (creates table based on DataFrame dtypes)
         df.head(0).to_sql(name=final_table, con=self.db.engine, if_exists="replace", index=False)
 
-        # Log completion
         logger.info(f"Schema bootstrapped for <green>{final_table}</green>")
 
     def _arrow_type_to_pg(self, arrow_type: pa.DataType) -> str:
-        # Map Arrow type to PostgreSQL type
+        """
+        Maps PyArrow data types (from Parquet) to PostgreSQL data types.
+        """
         t = str(arrow_type)
 
         if pa.types.is_timestamp(arrow_type):
@@ -121,27 +152,25 @@ class PostgresSchemaManager(SchemaManager):
         return "TEXT"
 
     def _bootstrap_final_schema_from_parquet_footer(self, file_path: str, final_table: str) -> None:
-        # Log start of schema bootstrapping
+        """
+        Creates a table schema by reading the metadata footer of a Parquet file.
+        This is faster and more accurate than sampling rows for Parquet.
+        """
         logger.info(f"Bootstrapping schema for <green>{final_table}</green> from Parquet footer")
 
-        # Read Parquet file schema
         pf = pq.ParquetFile(file_path)
         schema = pf.schema_arrow
 
-        # Build column definitions
         cols_sql = []
         for field in schema:
             col = sanitize_ident(field.name)
             pg_type = self._arrow_type_to_pg(field.type)
             cols_sql.append(f"{qident(col)} {pg_type}")
 
-        # Build CREATE TABLE statement
         ddl = f"CREATE TABLE {qident(final_table)} ({', '.join(cols_sql)})"
 
-        # Drop existing table and create new one
         with self.db.begin() as conn:
             conn.execute(text(f"DROP TABLE IF EXISTS {qident(final_table)}"))
             conn.execute(text(ddl))
 
-        # Log completion
         logger.info(f"Schema bootstrapped for <green>{final_table}</green>")

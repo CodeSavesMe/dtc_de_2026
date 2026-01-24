@@ -60,3 +60,6 @@ terraform.tfvars
 crash.log
 crash.log.*
 *.tfplan
+
+# Note
+docker_ingestion_pipeline/logicCode.md

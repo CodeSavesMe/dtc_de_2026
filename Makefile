@@ -23,7 +23,7 @@ help: ## Show this help message
 
 #------- Docker Services -------
 up: ## Start database services (Postgres + pgAdmin)
-	docker-compose up -d
+	docker-compose up -d --build app db
 
 down: ## Stop database services
 	docker-compose down
@@ -44,7 +44,7 @@ clean: ## Remove Python cache, log files, and temporary files
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	rm -f logs/*.log
 	# Optional: remove raw data files if desired
-	# rm -f data/*.csv data/*.parquet
+	rm -f data/*.csv data/*.parquet
 	@echo "Clean up finished."
 
 #------- Database Data Cleanup -------
@@ -54,3 +54,4 @@ clean-data: ## DANGER: Stop containers and delete 'ny_data' folder (requires sud
 	@echo "Removing Postgres data volume (sudo permissions required)..."
 	sudo rm -rf ny_data
 	@echo "Database data wiped. You can now run 'make up' for a fresh DB."
+

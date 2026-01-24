@@ -137,7 +137,7 @@ class PostgresStagingValidator(Validator):
                 )
 
                 # Determine if thresholds are exceeded
-                exceeds = (outside > self.max_outside_month_abs) and (ratio > self.max_outside_month_ratio)
+                exceeds = (outside > self.max_outside_month_abs) or (ratio > self.max_outside_month_ratio)
 
                 # Raise error or log warning/info based on configuration
                 if exceeds:
@@ -157,6 +157,5 @@ class PostgresStagingValidator(Validator):
 
             except Exception as e:
                 # Log parsing or validation errors but don't break execution
-                logger.debug(f"Month validation skipped/failed to parse: {e}")
-
+                logger.warning(f"Month validation skipped/failed to parse: {e}")
         return result

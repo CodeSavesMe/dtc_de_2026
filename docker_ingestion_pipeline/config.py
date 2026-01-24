@@ -1,4 +1,4 @@
-# docker-ingestion-pipeline/config.py
+# docker_ingestion_pipeline/config.py
 
 from __future__ import annotations
 
@@ -10,33 +10,41 @@ from pathlib import Path
 from loguru import logger
 
 
-def project_root() -> Path:
+def env_bool(name: str, default: bool = False) -> bool:
     """
-    Return the root directory of the project.
+    Parses an environment variable as a boolean.
+    Returns the default value if the variable is unset.
+    True values: "1", "true", "t", "yes", "y", "on" (case-insensitive).
+    """
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
-    Notes:
-    - Assumes this file is located two levels below the project root.
-    """
+
+def project_root() -> Path:
+    """Returns the absolute path to the project root directory."""
     return Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
 class Paths:
-    # Holds paths to key project directories
+    """Immutable container for project directory paths."""
     base_dir: Path
     data_dir: Path
     log_dir: Path
 
 
 def build_paths() -> Paths:
-    # Determine project root
+    """
+    Resolves project paths and creates required directories on disk.
+    Defaults data_dir to ./data if DATA_DIR env var is not set.
+    """
     base = project_root()
 
-    # Create or get data directory from environment variable or default
     data_dir = Path(os.getenv("DATA_DIR", str(base / "data")))
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create logs directory under project root
     log_dir = base / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -44,26 +52,44 @@ def build_paths() -> Paths:
 
 
 def configure_logging(paths: Paths) -> None:
-    # Remove default logger configuration
+    """Configure loguru sinks (console + file) with tqdm-safe console output."""
     logger.remove()
 
-    # Log to console with basic formatting and INFO level by default
+    try:
+        from tqdm import tqdm  # type: ignore
+    except Exception:
+        tqdm = None
+
+    def _console_sink(message: str) -> None:
+        """
+        Writes logs to stdout.
+        Uses tqdm.write if progress bars are enabled to prevent visual corruption.
+        """
+        if env_bool("ENABLE_PROGRESS", default=True) and tqdm is not None:
+            tqdm.write(message.rstrip("\n"))
+        else:
+            sys.stdout.write(message)
+            sys.stdout.flush()
+
+    # Console sink
     logger.add(
-        sys.stdout,
+        _console_sink,
         level=os.getenv("LOG_LEVEL", "INFO"),
         colorize=True,
         backtrace=False,
         diagnose=False,
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
                "<level>{level}</level> | "
-               "<level>{message}</level>",
+               "<level>{message}</level>\n",
     )
 
-    # Log to file with detailed formatting and DEBUG level
+    # File sink
     logger.add(
         str(paths.log_dir / "app.log"),
         rotation="10 MB",
         retention="7 days",
         level="DEBUG",
+        backtrace=False,
+        diagnose=False,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{function}:{line} | {message}",
     )
