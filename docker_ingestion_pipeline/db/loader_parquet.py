@@ -1,3 +1,5 @@
+# docker_ingestion_pipeline/db/loader_parquet.py
+
 from __future__ import annotations
 
 import csv
@@ -15,26 +17,27 @@ from docker_ingestion_pipeline.ports.database import Database
 from docker_ingestion_pipeline.ports.loader import Loader
 from docker_ingestion_pipeline.utils.datetime_fix import fix_datetime_columns
 from docker_ingestion_pipeline.utils.identifiers import qident, sanitize_ident
-from docker_ingestion_pipeline.utils.progress import track
+from docker_ingestion_pipeline.utils.progress import track, progress_enable
 
 
 @dataclass(frozen=True)
 class ParquetStreamLoader(Loader):
     """
     Loads Parquet data into Postgres using the COPY command with streaming.
-
-    Key Features:
-    - Memory efficient: Reads Parquet in batches instead of loading the full file.
-    - Type safe: Coerces Pandas types to match Postgres requirements (handling nullable ints, etc.).
-    - Transactional: Commits only if all batches succeed; rolls back on failure.
+    - Memory efficient: Iterates through Parquet batches instead of full load.
+    - Type safe: Coerces types to match Postgres schema requirements.
+    - Fast: Uses COPY via a CSV-formatted memory stream.
     """
     db: Database
-    batch_size: int = 100_000
+    chunk_size: int = 100_000
+    batch_size: int = 10_000
 
+    # PostgreSQL type categories for mapping
     _INT_TYPES: ClassVar[FrozenSet[str]] = frozenset({"bigint", "integer", "smallint"})
     _NUM_TYPES: ClassVar[FrozenSet[str]] = frozenset({"numeric", "decimal", "real", "double precision"})
 
     def _get_pg_column_types(self, table_name: str, target_cols: list[str]) -> Dict[str, str]:
+        """Fetch existing column data types from the target database."""
         pg_types = self.db.get_table_column_types(table_name)
         if not pg_types:
             raise RuntimeError(f"Could not read column types for table '{table_name}'")
@@ -46,12 +49,14 @@ class ParquetStreamLoader(Loader):
         return pg_types
 
     def _coerce_integer_columns(self, df: pd.DataFrame, int_cols: List[str]) -> pd.DataFrame:
+        """Clean integer columns: handles NULLs and prevents decimal truncation errors."""
         for col in int_cols:
             if col not in df.columns:
                 continue
 
             series = pd.to_numeric(df[col], errors="coerce")
 
+            # Identify actual decimals in an integer column
             frac = (series % 1).abs()
             has_decimals = series.notna() & (~np.isclose(frac, 0.0, atol=1e-9))
 
@@ -68,30 +73,32 @@ class ParquetStreamLoader(Loader):
         return df
 
     def _coerce_numeric_columns(self, df: pd.DataFrame, num_cols: List[str]) -> pd.DataFrame:
+        """Force conversion to numeric; invalid entries become NaN."""
         for col in num_cols:
-            if col not in df.columns:
-                continue
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
         return df
 
     def load(self, file_path: str, table_name: str) -> None:
+        """Main ingestion logic: Stream Parquet -> Pandas Transformation -> Postgres COPY."""
         table_name = sanitize_ident(table_name)
+
+        # 1. Fetch Schema Metadata
         target_cols = self.db.get_table_columns(table_name)
         if not target_cols:
             raise RuntimeError(f"Target table {table_name} has no columns")
 
         target_col_set = set(target_cols)
-
         pg_types = self._get_pg_column_types(table_name, target_cols)
-        cols_to_check_int = [
-            col for col, dtype in pg_types.items()
-            if dtype in self._INT_TYPES and col in target_col_set
-        ]
-        cols_to_check_num = [
-            col for col, dtype in pg_types.items()
-            if dtype in self._NUM_TYPES and col in target_col_set
-        ]
 
+        # Categorize columns for specialized cleaning
+        cols_to_check_int = [col for col, dtype in pg_types.items() if
+                             dtype in self._INT_TYPES and col in target_col_set]
+        cols_to_check_num = [col for col, dtype in pg_types.items() if
+                             dtype in self._NUM_TYPES and col in target_col_set]
+
+        # 2. Prepare SQL
+        # We stream Parquet data out as CSV text for the Postgres COPY command
         col_list_sql = ", ".join(qident(c) for c in target_cols)
         copy_sql = (
             f"COPY {qident(table_name)} ({col_list_sql}) "
@@ -100,25 +107,28 @@ class ParquetStreamLoader(Loader):
 
         logger.info(f"Starting COPY (Parquet stream) into <green>{table_name}</green> ...")
 
+        # Open Parquet file metadata to estimate rows
         pf = pq.ParquetFile(file_path)
         total_rows_est = pf.metadata.num_rows if pf.metadata else None
 
         raw_conn = self.db.raw_connection()
-
         try:
             with raw_conn.cursor() as cur:
                 total_rows = 0
 
                 with track(total=total_rows_est, desc=f"Loading {table_name}") as tracker:
-                    for i, batch in enumerate(pf.iter_batches(batch_size=self.batch_size)):
+                    # 3. Batch iteration through the Parquet file
+                    for i, batch in enumerate(pf.iter_batches(batch_size=self.chunk_size)):
                         arrow_table = pa.Table.from_batches([batch])
 
+                        # Schema validation on the first batch
                         if i == 0:
                             existing_cols = set(arrow_table.column_names)
                             missing = [c for c in target_cols if c not in existing_cols]
                             if missing:
-                                raise RuntimeError(f"Parquet missing columns: {missing}")
+                                raise RuntimeError(f"Parquet file missing required columns: {missing}")
 
+                        # 4. Data Transformation
                         arrow_table = arrow_table.select(target_cols)
                         df = arrow_table.to_pandas(integer_object_nulls=True)
 
@@ -127,32 +137,42 @@ class ParquetStreamLoader(Loader):
                         df = self._coerce_integer_columns(df, cols_to_check_int)
                         df = df.reindex(columns=target_cols)
 
-                        buf = io.StringIO()
-                        df.to_csv(
-                            buf,
-                            index=False,
-                            header=False,
-                            na_rep="",
-                            lineterminator="\n",
-                            quoting=csv.QUOTE_MINIMAL,
-                            doublequote=True,
-                        )
-                        buf.seek(0)
+                        # 5. Internal Batching: Stream from current chunk to DB
+                        rows_in_chunk = len(df)
+                        for start in range(0, rows_in_chunk, self.batch_size):
+                            out_batch = df.iloc[start:start + self.batch_size]
 
-                        cur.copy_expert(copy_sql, buf)
+                            buf = io.StringIO()
+                            out_batch.to_csv(
+                                buf,
+                                index=False,
+                                header=False,
+                                na_rep="",
+                                lineterminator="\n",
+                                quoting=csv.QUOTE_MINIMAL,
+                                doublequote=True,
+                            )
+                            buf.seek(0)
+                            cur.copy_expert(copy_sql, buf)
 
-                        rows_loaded = len(df)
-                        total_rows += rows_loaded
-                        tracker.update(rows_loaded)
+                            rows_loaded = len(out_batch)
+                            total_rows += rows_loaded
+                            tracker.update(rows_loaded)
 
-                        del df, arrow_table, buf
+                            del out_batch, buf
+
+                        # Heartbeat logging for non-interactive environments
+                        if (i + 1) % 5 == 0 and not progress_enable():
+                            logger.info(f"Processed {i + 1} Parquet chunks... Total rows: {total_rows}")
+
+                        del df, arrow_table
 
             raw_conn.commit()
-            logger.success(f"COPY finished for <green>{table_name}</green>, rows={total_rows}")
+            logger.success(f"Parquet Load Completed: {table_name} ({total_rows} rows)")
 
         except Exception:
             raw_conn.rollback()
-            logger.exception("Failed to load data, transaction rolled back.")
+            logger.exception("Failed to load Parquet data, transaction rolled back.")
             raise
         finally:
             raw_conn.close()

@@ -1,4 +1,4 @@
-# docker-docker-ingestion-pipeline/core/ingestion_pipeline.py
+# docker_ingestion_pipeline/core/ingestion_pipeline.py
 
 from __future__ import annotations
 

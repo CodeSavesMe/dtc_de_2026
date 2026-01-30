@@ -22,21 +22,22 @@ from docker_ingestion_pipeline.utils.progress import track, progress_enable
 class TsvCopyLoader(Loader):
     """
     Loads TSV data into Postgres using batches.
-
     - Reads input as TSV (tab-separated).
     - Converts chunks to standard CSV format in memory.
-    - Streams to Postgres using COPY.
+    - Streams to Postgres using COPY for maximum performance.
     """
     db: Database
-    chunksize: int = 100_000
+    chunk_size: int = 100_000
+    batch_size: int = 10_000
     encoding: str = "utf-8"
     delimiter: str = "\t"  # Input file uses tabs
 
+    # PostgreSQL type categories for mapping
     _INT_TYPES: ClassVar[FrozenSet[str]] = frozenset({"bigint", "integer", "smallint"})
     _NUM_TYPES: ClassVar[FrozenSet[str]] = frozenset({"numeric", "decimal", "real", "double precision"})
 
     def _get_pg_column_types(self, table_name: str, target_cols: list[str]) -> Dict[str, str]:
-        """Gets column types from the database."""
+        """Fetch existing column data types from the target database."""
         pg_types = self.db.get_table_column_types(table_name)
         if not pg_types:
             raise RuntimeError(f"Could not read column types for table '{table_name}'")
@@ -48,7 +49,7 @@ class TsvCopyLoader(Loader):
         return pg_types
 
     def _coerce_numeric_columns(self, df: pd.DataFrame, num_cols: List[str]) -> pd.DataFrame:
-        """Converts columns to numbers. Invalid values become NaN."""
+        """Force conversion to numeric; invalid strings become NaN (NULL)."""
         for col in num_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -56,9 +57,10 @@ class TsvCopyLoader(Loader):
 
     def _coerce_integer_columns(self, df: pd.DataFrame, int_cols: List[str]) -> pd.DataFrame:
         """
-        Fixes integer columns.
-        - Converts valid numbers to integers.
-        - Sets values with decimals (like 1.5) to NULL.
+        Clean integer columns:
+        1. Parse to numeric.
+        2. Replace actual decimals (e.g., 1.5) with NULL to prevent DB errors.
+        3. Convert to nullable Int64.
         """
         for col in int_cols:
             if col not in df.columns:
@@ -66,7 +68,7 @@ class TsvCopyLoader(Loader):
 
             series = pd.to_numeric(df[col], errors="coerce")
 
-            # Check for decimals
+            # Identify rows with actual decimal fractions
             frac = (series % 1).abs()
             has_decimals = series.notna() & (~np.isclose(frac, 0.0, atol=1e-9))
 
@@ -83,9 +85,10 @@ class TsvCopyLoader(Loader):
         return df
 
     def load(self, file_path: str, table_name: str) -> None:
+        """Main ingestion logic: Read TSV -> Process in Pandas -> Copy to Postgres."""
         table_name = sanitize_ident(table_name)
 
-        # 1. Get database schema
+        # 1. Fetch Schema Metadata
         target_cols = self.db.get_table_columns(table_name)
         if not target_cols:
             raise RuntimeError(f"Target table {table_name} has no columns")
@@ -93,17 +96,12 @@ class TsvCopyLoader(Loader):
         target_col_set = set(target_cols)
         pg_types = self._get_pg_column_types(table_name, target_cols)
 
-        cols_to_check_int = [
-            col for col, dtype in pg_types.items()
-            if dtype in self._INT_TYPES and col in target_col_set
-        ]
-        cols_to_check_num = [
-            col for col, dtype in pg_types.items()
-            if dtype in self._NUM_TYPES and col in target_col_set
-        ]
+        # Categorize columns for specialized cleaning
+        cols_to_check_int = [col for col, dtype in pg_types.items() if dtype in self._INT_TYPES and col in target_col_set]
+        cols_to_check_num = [col for col, dtype in pg_types.items() if dtype in self._NUM_TYPES and col in target_col_set]
 
         # 2. Prepare SQL
-        # Use standard CSV format (comma) for the database stream to ensure stability.
+        # We stream as CSV (comma) even if the source is TSV to ensure stable parsing in Postgres
         col_list_sql = ", ".join(qident(c) for c in target_cols)
         copy_sql = (
             f"COPY {qident(table_name)} ({col_list_sql}) "
@@ -112,19 +110,17 @@ class TsvCopyLoader(Loader):
 
         logger.info(f"Starting COPY (TSV chunks) into <green>{table_name}</green> ...")
 
-        total_est: Optional[int] = None
         raw_conn = self.db.raw_connection()
-
         try:
             with raw_conn.cursor() as cur:
                 total_rows = 0
 
-                with track(total=total_est, desc=f"Loading {table_name}") as tracker:
-                    # 3. Read input file
+                with track(total=None, desc=f"Loading {table_name}") as tracker:
+                    # 3. Stream read from TSV file in chunks to save memory
                     reader = pd.read_csv(
                         file_path,
                         sep=self.delimiter,
-                        chunksize=self.chunksize,
+                        chunksize=self.chunk_size,
                         usecols=lambda c: c.strip() in target_col_set,
                         dtype=str,
                         compression="infer",
@@ -133,58 +129,58 @@ class TsvCopyLoader(Loader):
                     )
 
                     for i, chunk in enumerate(reader):
-                        # Remove spaces from headers in every chunk
+                        # Sanitize headers
                         chunk.columns = [c.strip() for c in chunk.columns]
 
-                        # Check for duplicates or missing columns on the first chunk
+                        # Validation for the first chunk
                         if i == 0:
                             if len(chunk.columns) != len(set(chunk.columns)):
-                                raise RuntimeError(
-                                    "Duplicate columns detected after stripping TSV header"
-                                )
-
+                                raise RuntimeError("Duplicate columns detected in TSV header")
                             missing = [c for c in target_cols if c not in chunk.columns]
                             if missing:
-                                raise RuntimeError(
-                                    f"TSV missing columns required by target table: {missing}"
-                                )
+                                raise RuntimeError(f"TSV missing columns: {missing}")
 
-                        # Match column order with database
+                        # 4. Data Transformation
                         chunk = chunk.reindex(columns=target_cols)
-
-                        # Fix data types
                         chunk = fix_datetime_columns(chunk)
                         chunk = self._coerce_numeric_columns(chunk, cols_to_check_num)
                         chunk = self._coerce_integer_columns(chunk, cols_to_check_int)
 
-                        # Write to buffer using standard CSV delimiter (comma)
-                        buf = io.StringIO()
-                        chunk.to_csv(
-                            buf,
-                            index=False,
-                            header=False,
-                            sep=",",
-                            na_rep="",
-                            lineterminator="\n",
-                            quoting=csv.QUOTE_MINIMAL,
-                            doublequote=True,
-                        )
-                        buf.seek(0)
+                        # 5. Internal Batching: Convert chunk to CSV and send to DB
+                        rows_in_chunk = len(chunk)
+                        for start in range(0, rows_in_chunk, self.batch_size):
+                            batch = chunk.iloc[start:start + self.batch_size]
 
-                        # Send to database
-                        cur.copy_expert(copy_sql, buf)
-
-                        rows_loaded = len(chunk)
-                        total_rows += rows_loaded
-                        tracker.update(rows_loaded)
-
-                        if (i + 1) % 10 == 0 and not progress_enable():
-                            logger.debug(
-                                f"Streamed {i + 1} TSV chunks (rows so far={total_rows})..."
+                            buf = io.StringIO()
+                            batch.to_csv(
+                                buf,
+                                index=False,
+                                header=False,
+                                sep=",",  # Transform TSV data to CSV format for the stream
+                                na_rep="",
+                                lineterminator="\n",
+                                quoting=csv.QUOTE_MINIMAL,
+                                doublequote=True,
                             )
+                            buf.seek(0)
+                            cur.copy_expert(copy_sql, buf)
+
+                            rows_loaded = len(batch)
+                            total_rows += rows_loaded
+                            tracker.update(rows_loaded)
+
+                            # Explicitly clean up small batch buffers
+                            del batch, buf
+
+                        # Heartbeat logging for non-interactive logs (e.g., Docker/CI)
+                        if (i + 1) % 5 == 0 and not progress_enable():
+                            logger.info(f"Processed {i + 1} chunks... Total rows: {total_rows}")
+
+                        # Explicitly clean up the large chunk
+                        del chunk
 
             raw_conn.commit()
-            logger.success(f"COPY finished for <green>{table_name}</green>, rows={total_rows}")
+            logger.success(f"TSV Load Completed: {table_name} ({total_rows} rows)")
 
         except Exception:
             raw_conn.rollback()
