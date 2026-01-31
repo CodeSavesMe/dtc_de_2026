@@ -1,57 +1,129 @@
-# Makefile
+# Module 01 - Docker & Terraform (DTC DE Zoomcamp 2026)
+# - Matches current CLI: `python main.py ingest` and `python main.py ingest-url`
+# - Matches docker-compose services: `db` and `app`
 
-#------- Configuration -------
 SHELL := /bin/bash
 
-# Load environment variables from .env if the file exists
+# --- Load .env (optional) ---
 ifneq ("$(wildcard .env)","")
-    include .env
-    export $(shell sed 's/=.*//' .env)
+	include .env
+	export $(shell sed 's/=.*//' .env)
 endif
 
-#------- Paths & Variables -------
-# Python command (change if using an alternative runner)
-PYTHON := python
-INGEST_SCRIPT := main.py
+# --- Tools ---
+COMPOSE ?= docker compose
+PYTHON  ?= python
+TF      ?= terraform
 
-# Declare phony targets to avoid conflicts with files
-.PHONY: help up down reset ingest clean clean-data
+# --- Paths ---
+TF_DIR  ?= terraform
 
-#------- Help -------
-help: ## Show this help message
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+# --- Defaults (override in command line) ---
+# Example:
+#   make ingest TAXI=green YEAR=2021 MONTH=01 FILE_FORMAT=csv IF_EXISTS=replace KEEP_LOCAL=false
+TAXI        ?= green
+YEAR        ?= 2021
+MONTH       ?= 01
+FILE_FORMAT ?= parquet
+IF_EXISTS   ?= replace
+KEEP_LOCAL  ?= true
 
-#------- Docker Services -------
-up: ## Start database services (Postgres + pgAdmin)
-	docker-compose up -d --build app db
+# For ingest-url
+DATA_URL    ?=
+TABLE_NAME  ?=
 
-down: ## Stop database services
-	docker-compose down
+.DEFAULT_GOAL := help
 
-reset: ## Stop services, remove volumes, and start fresh
-	docker-compose down -v
-	docker-compose up -d
-	@echo "Docker services have been reset."
+.PHONY: help env up-db up down reset logs psql \
+        ingest ingest-url \
+        tf-init tf-apply tf-destroy \
+        clean clean-data
 
-#------- Data Ingestion -------
-ingest: ## Run data ingestion. Usage: make ingest TABLE=mytable URL=http://...
-	@if [ -z "$(TABLE)" ]; then echo "Error: TABLE is required. Example: make ingest TABLE=green_tripdata_2019_10"; exit 1; fi
-	@# Run ingestion script from project root
-	$(PYTHON) $(INGEST_SCRIPT) --table_name=$(TABLE) $(if $(URL),--url=$(URL),)
+help: ## Show available commands
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z0-9_-]+:.*?## / {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-#------- Cleanup -------
-clean: ## Remove Python cache, log files, and temporary files
-	find . -type d -name "__pycache__" -exec rm -rf {} +
-	rm -f logs/*.log
-	# Optional: remove raw data files if desired
-	rm -f data/*.csv data/*.parquet
-	@echo "Clean up finished."
+env: ## Create .env from .env.example if missing
+	@if [ ! -f .env ]; then \
+		if [ -f .env.example ]; then cp .env.example .env && echo "Created .env from .env.example"; \
+		else echo "ERROR: .env.example not found"; exit 1; fi \
+	else echo ".env already exists"; fi
 
-#------- Database Data Cleanup -------
-clean-data: ## DANGER: Stop containers and delete 'ny_data' folder (requires sudo)
+# -------------------------
+# Docker
+# -------------------------
+up-db: env ## Start Postgres only (recommended)
+	$(COMPOSE) up -d db
+
+up: env ## Start db + app (app is a runnable container; use `make ingest` for jobs)
+	$(COMPOSE) up -d db
+
+down: ## Stop and remove containers
+	$(COMPOSE) down
+
+reset: ## Reset containers (keeps ny_data folder unless you run clean-data)
+	$(COMPOSE) down
+	$(COMPOSE) up -d db
+	@echo "Services restarted."
+
+logs: ## Tail app logs (container output)
+	$(COMPOSE) logs -f app
+
+psql: ## Open psql inside db container
+	$(COMPOSE) exec db psql -U $${DB_USER:-postgres} -d $${DB_NAME:-ny_taxi}
+
+# -------------------------
+# Ingestion (Docker - recommended)
+# -------------------------
+ingest: up-db ## Run standard ingestion (DTC URL). Override vars: TAXI/YEAR/MONTH/FILE_FORMAT/IF_EXISTS/KEEP_LOCAL
+	@KEEP_FLAG="--keep-local"; \
+	if [ "$(KEEP_LOCAL)" = "false" ] || [ "$(KEEP_LOCAL)" = "0" ]; then KEEP_FLAG="--no-keep-local"; fi; \
+	$(COMPOSE) run --rm app ingest \
+		--taxi $(TAXI) \
+		--year $(YEAR) \
+		--month $(MONTH) \
+		--file-format $(FILE_FORMAT) \
+		--if-exists $(IF_EXISTS) \
+		$$KEEP_FLAG
+
+ingest-url: up-db ## Run ingestion from custom URL (DATA_URL required; TABLE_NAME optional)
+	@if [ -z "$(DATA_URL)" ]; then \
+		echo "ERROR: DATA_URL is required."; \
+		echo "Example: make ingest-url DATA_URL='https://example.com/file.parquet' TABLE_NAME=my_table"; \
+		exit 1; \
+	fi
+	@KEEP_FLAG="--keep-local"; \
+	if [ "$(KEEP_LOCAL)" = "false" ] || [ "$(KEEP_LOCAL)" = "0" ]; then KEEP_FLAG="--no-keep-local"; fi; \
+	if [ -z "$(TABLE_NAME)" ]; then \
+		$(COMPOSE) run --rm app ingest-url --url "$(DATA_URL)" $$KEEP_FLAG; \
+	else \
+		$(COMPOSE) run --rm app ingest-url --url "$(DATA_URL)" --table-name "$(TABLE_NAME)" $$KEEP_FLAG; \
+	fi
+
+# -------------------------
+# Terraform (Module 01)
+# -------------------------
+tf-init: ## terraform init
+	cd $(TF_DIR) && $(TF) init
+
+tf-apply: ## terraform apply
+	cd $(TF_DIR) && $(TF) apply
+
+tf-destroy: ## terraform destroy (careful 💸)
+	@echo "CAUTION: This will delete Terraform-managed resources."
+	@echo "Run it when you're done testing (unless you enjoy surprise invoices 💸)."
+	cd $(TF_DIR) && $(TF) destroy
+
+# -------------------------
+# Cleanup
+# -------------------------
+clean: ## Remove python caches and local logs (safe)
+	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
+	rm -f logs/*.log || true
+	@echo "Clean done."
+
+clean-data: ## DANGER: stop containers and delete Postgres data folder (01-docker-terraform/ny_data)
+	@echo "DANGER: this will delete local Postgres data under ./ny_data"
 	@echo "Stopping containers..."
-	docker-compose down
-	@echo "Removing Postgres data volume (sudo permissions required)..."
-	sudo rm -rf ny_data
-	@echo "Database data wiped. You can now run 'make up' for a fresh DB."
-
+	$(COMPOSE) down
+	@read -p "Type 'DELETE' to continue: " ans; \
+	if [ "$$ans" = "DELETE" ]; then rm -rf ny_data && echo "ny_data removed."; else echo "Canceled."; fi

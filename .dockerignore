@@ -1,0 +1,72 @@
+# --- 1. VCS & Git metadata ---
+.git
+.gitignore
+
+# --- 2. Secrets (CRITICAL) ---
+.env
+.env.*
+!.env.example
+
+# --- 3. Python bytecode & caches ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- 4. Virtual environments ---
+.venv/
+venv/
+ENV/
+
+# --- 5. Local runtime outputs ---
+logs/
+**/logs/
+*.log
+
+# --- 6. Data downloads / generated artifacts ---
+data/
+**/data/*.parquet
+**/data/*.csv
+**/data/*.tsv
+**/data/*.csv.gz
+
+# If you have sample data you WANT inside image, whitelist here (optional)
+#!data/sample/
+
+# --- 7. Notebooks (optional) ---
+notebooks/
+.ipynb_checkpoints/
+
+# --- 8. Terraform / IaC (not needed in app image) ---
+terraform/
+**/.terraform/
+**/terraform.tfstate
+**/terraform.tfstate.*
+**/*.tfvars
+**/*.tfvars.json
+
+# --- 9. OS / IDE junk ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- 10. Build / packaging outputs ---
+dist/
+build/
+*.egg-info/
+
+# --- 11. Local temp files ---
+*.tmp
+*.swp
+*.swo
+
+# --- 12. Tests ---
+tests/

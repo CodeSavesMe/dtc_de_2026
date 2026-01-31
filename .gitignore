@@ -1,65 +1,82 @@
-# Python bytecode and build files
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
-wheels/
-
-# Virtual environments
-.venv/
-.python-version
-
-# Logs
-logs/
-
-# Data files
-data/
-*.csv
-*.tsv
-*.parquet
-*.gz
-
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints/
-
-# Docker
-*.env
+# --- 1. Security (CRITICAL) ---
 .env
-.env.local
-.dockerignore
-docker-compose.override.yml
+.env.*
+!.env.example
 
-# IDE / Editor
-.idea/
-*.iml
-
-# Python packaging
-pyproject.toml
-uv.lock
-
-# Misc
+# --- 2. Runtime Data & Logs ---
+logs/
+**/logs/
 *.log
 
-#notebook
+# Postgres persistent data (Module 01)
+01-docker-terraform/ny_data/
+
+# Keep sample data committed, ignore generated downloads
+**/data/**/*.parquet
+**/data/**/*.csv
+**/data/**/*.tsv
+**/data/**/*.csv.gz
+**/data/**/*.tsv.gz
+
+# Allow curated samples (Module 01 only)
+!01-docker-terraform/data/**/*.parquet
+!01-docker-terraform/data/**/*.csv
+!01-docker-terraform/data/**/*.tsv
+!01-docker-terraform/data/**/*.csv.gz
+!01-docker-terraform/data/**/*.tsv.gz
+
+# --- 3. Python & Environment ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+.venv/
+venv/
+ENV/
+env/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# --- 4. Terraform (CRITICAL) ---
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/crash.log
+**/crash.*.log
+
+# tfvars often contain project IDs / sensitive config
+**/*.tfvars
+**/*.tfvars.json
+!**/*.tfvars.example
+terraform/.terraform.lock.hcl
+**/.terraform.lock.hcl
+*.lock.hcl
+
+# --- 5. OS & IDE ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- 6. Optional local temp files ---
+*.tmp
+*.swp
+*.swo
+
+# --- 7. NOTEBOOK & ETC ---
 notebooks/
 
-
-# TERRAFORM BLOCK
-
-.terraform/
-
-*.tfstate
-*.tfstate.*
-
-*.tfvars
-terraform.tfvars
-
-.terraform.lock.hcl
-
-crash.log
-crash.log.*
-*.tfplan
-
-# Note
-docker_ingestion_pipeline/logicCode.md
+# NOTE: do NOT ignore markdown in docker_ingestion_pipeline/
+docker_ingestion_pipeline/*md
