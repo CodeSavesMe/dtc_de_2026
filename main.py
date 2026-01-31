@@ -261,11 +261,18 @@ def ingest_cmd(
                 sys.exit(2)
             if if_exists == "replace":
                 logger.info("Table exists. Pipeline will use Atomic Swap (Staging -> Final).")
+            if if_exists == "append":
+                logger.info("Table exists. Pipeline will append rows (Staging -> INSERT -> Final).")
 
         # 3. Execute Pipeline
         loader_settings = load_loader_settings()
         pipeline = build_pipeline(pg_client, loader_settings)
-        pipeline.run(url=url, table_name=table_name, keep_local=keep_local)
+        pipeline.run(
+            url=url,
+            table_name=table_name,
+            keep_local=keep_local,
+            if_exists=if_exists,
+        )
 
         logger.success(f"Job Completed: {pg_client.schema}.{table_name}")
 
@@ -277,15 +284,24 @@ def ingest_cmd(
 @cli.command("ingest-url", help="Custom Ingestion: Download from an arbitrary URL.")
 @click.option("--url", default=lambda: env_default("DATA_URL"), required=True,
               help="Full URL to the raw file (Parquet/CSV).")
+
 @click.option("--table-name", default=None,
               help="Target table name (Auto-inferred from filename if omitted).")
+
+@click.option("--if-exists", type=click.Choice(["skip", "replace", "fail", "append"]),
+              default=lambda: env_default("IF_EXISTS", "replace"), show_default=True,
+              help="Strategy if table exists. 'replace' swaps staging->final; 'append' inserts staging into final.")
+
 @click.option("--keep-local/--no-keep-local",
               default=lambda: (env_default("KEEP_LOCAL", "true") or "true").lower() in {"1", "true", "yes", "on"},
               show_default=True, help="Retain downloaded file on disk.")
 
 def ingest_url_cmd(
-    url: str, table_name: str | None, keep_local: bool
-    ) -> None:
+        url: str,
+        table_name: str | None,
+        if_exists: str,
+        keep_local: bool
+) -> None:
     """
     Executes a custom ingestion job.
     Useful for ad-hoc files or sources outside the standard naming convention.
@@ -296,13 +312,31 @@ def ingest_url_cmd(
 
         logger.info(f"JOB START (Custom URL): {url}")
         logger.info(f"Target Table: {table_name}")
+        logger.info(f"Strategy : {if_exists}")
 
         pg_client = build_pg_client()
 
+        # Pre-flight check for existing table
+        if pg_client.table_exists(table_name):
+            if if_exists == "skip":
+                logger.warning(f"Table {pg_client.schema}.{table_name} exists. Skipping.")
+                return
+            if if_exists == "fail":
+                logger.error(f"Table {pg_client.schema}.{table_name} exists. Aborting.")
+                sys.exit(2)
+            if if_exists == "replace":
+                logger.info("Table exists. Pipeline will use Atomic Swap (Staging -> Final).")
+            if if_exists == "append":
+                logger.info("Table exists. Pipeline will append rows (Staging -> INSERT -> Final).")
+
         loader_settings = load_loader_settings()
         pipeline = build_pipeline(pg_client, loader_settings)
-
-        pipeline.run(url=url, table_name=table_name, keep_local=keep_local)
+        pipeline.run(
+            url=url,
+            table_name=table_name,
+            keep_local=keep_local,
+            if_exists=if_exists,
+        )
 
         logger.success(f"Job Completed: {pg_client.schema}.{table_name}")
 

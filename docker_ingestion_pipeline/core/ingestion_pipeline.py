@@ -8,7 +8,7 @@ from time import time
 from typing import TYPE_CHECKING
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import text, exc
 
 from docker_ingestion_pipeline.utils.file_types import detect_file_format, FileFormat
 from docker_ingestion_pipeline.utils.downloader import download_file
@@ -65,15 +65,26 @@ class IngestionPipeline:
             raise ValueError(f"No loader configured for format: {fmt}")
         return loader
 
-    def run(self, url: str, table_name: str, keep_local: bool = True) -> None:
+    def run(
+            self,
+            url: str,
+            table_name: str,
+            keep_local: bool = True,
+            if_exists: str = "replace"
+    ) -> None:
         # Normalize table name
         table_name = sanitize_ident(table_name)
 
         # Use a staging table for safe loading
         staging_table = sanitize_ident(f"{table_name}__staging")
 
-        # Lock key scoped per destination table
-        lock_key = f"ingest:{table_name}"
+        # Lock key scoped per destination table + schema (avoid cross-schema contention)
+        schema = getattr(self.db, "schema", "public")
+        lock_key = f"ingest:{schema}:{table_name}"
+
+        # Validate if_exists strategy (core only supports the behaviors implemented here)
+        if if_exists not in {"replace", "append"}:
+            raise ValueError(f"Unsupported if_exists strategy in core pipeline: {if_exists!r}")
 
         # Download source file
         file_path = download_file(url)
@@ -109,20 +120,37 @@ class IngestionPipeline:
                 )
 
                 # 4. Validate loaded data
-                expected_month = self.validator.infer_expected_month_from_table(
-                    table_name
-                )
+                expected_month = self.validator.infer_expected_month_from_table(table_name)
+                if not expected_month:
+                    logger.debug(
+                        f"No YYYY_MM pattern in table_name={table_name}; month spillover check will be skipped."
+                    )
+                self.validator.validate_staging(staging_table, expected_month=expected_month)
 
-                self.validator.validate_staging(
-                    staging_table,
-                    expected_month=expected_month,
-                )
+                # 5. Apply "if_exists" strategy
+                if if_exists == "append":
+                    with self.db.begin() as conn:
+                        try:
+                            res = conn.execute(
+                                text(
+                                    f"""
+                                    INSERT INTO {qident(table_name)}
+                                    SELECT * FROM {qident(staging_table)}
+                                    """
+                                )
+                            )
+                            logger.info(f"Append completed: inserted_rows={res.rowcount}")
+                        except exc.IntegrityError as e:
+                            logger.error(f"Append failed: constraint violation on {schema}.{table_name}")
+                            raise RuntimeError(f"Constraint violation during append: {e}") from e
+                        finally:
+                            conn.execute(text(f"DROP TABLE IF EXISTS {qident(staging_table)}"))
 
-                # 5. Promote staging to final table
-                self.swapper.swap_tables_atomically(
-                    final_table=table_name,
-                    staging_table=staging_table,
-                )
+                else:
+                    self.swapper.swap_tables_atomically(
+                        final_table=table_name,
+                        staging_table=staging_table,
+                    )
 
                 # Run post-load optimization
                 self.optimizer.analyze(table_name)
