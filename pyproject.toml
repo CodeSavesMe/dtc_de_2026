@@ -1,0 +1,85 @@
+[project]
+# What: Core project metadata (name/version/description).
+# Used when: installing/running the project locally (pip/uv) or in CI.
+# How: `uv sync` or `pip install -e .`
+name = "01-docker-terraform"
+version = "0.1.0"
+description = "DTC DE 2026 - Module 01 (Docker & Terraform)"
+readme = "README.md"
+
+# What: Minimum supported Python version.
+# Used when: tooling resolves dependencies and checks compatibility.
+# How: ensure your interpreter matches (e.g., `python --version`).
+requires-python = ">=3.13"
+
+dependencies = [
+  # What: Runtime libraries required by the ingestion pipeline.
+  # Used when: `uv sync` / `pip install` installs runtime deps.
+
+  # Database access and SQL execution
+  "sqlalchemy>=2.0",
+  "psycopg2-binary>=2.9",
+
+  # Logging
+  "loguru>=0.7.0",
+
+  # Data processing (CSV/Parquet)
+  "pandas>=2.1",
+  "pyarrow>=12.0",
+
+  # Downloading files and loading env vars
+  "requests>=2.31",
+  "python-dotenv>=1.0,<1.3",
+]
+
+[dependency-groups]
+# What: Optional dev dependencies (not required to run the pipeline).
+# Used when: you want linting/testing/notebooks locally or in CI.
+# How: `uv sync --dev`
+dev = [
+  "pytest>=8.0",      # How: `pytest`
+  "ruff>=0.9",        # How: `ruff check .` and `ruff format .` (if enabled)
+  "mypy>=1.8",        # How: `mypy .`
+  "jupyter>=1.0",     # How: `jupyter lab` / `jupyter notebook`
+  "ipykernel>=6.29",  # Used by Jupyter to run this env as a kernel
+  "sqlfluff>=3.0",    # How: `sqlfluff lint sql/` / `sqlfluff fix sql/`
+]
+
+[tool.pytest.ini_options]
+# What: Pytest configuration for consistent discovery and output.
+# Used when: running tests locally or in CI.
+# How: `pytest`
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"
+markers = [
+  "unit: fast tests without DB/network",
+  "integration: tests requiring postgres/docker",
+]
+
+[tool.ruff]
+# What: Ruff config (lint + optional formatting).
+# Used when: keeping code style consistent.
+# How: `ruff check .` (and optionally `ruff format .`)
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# What: Enabled lint rule sets.
+# Used when: catching common bugs and enforcing imports/style.
+# How: `ruff check .`
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+  "E501", # Long lines; formatting/readability handled case-by-case
+]
+
+[tool.mypy]
+# What: Static type checking configuration.
+# Used when: ensuring type hints remain consistent as code grows.
+# How: `mypy .`
+python_version = "3.10"
+warn_unused_configs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_unused_ignores = true
