@@ -1,0 +1,62 @@
+# Python bytecode and build files
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Virtual environments
+.venv/
+.python-version
+
+# Logs
+logs/
+
+# Data files
+data/
+*.csv
+*.tsv
+*.parquet
+*.gz
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Docker
+*.env
+.env
+.env.local
+.dockerignore
+docker-compose.override.yml
+
+# IDE / Editor
+.idea/
+*.iml
+
+# Python packaging
+pyproject.toml
+uv.lock
+
+# Misc
+*.log
+
+#notebook
+notebooks/
+
+
+# TERRAFORM BLOCK
+
+.terraform/
+
+*.tfstate
+*.tfstate.*
+
+*.tfvars
+terraform.tfvars
+
+.terraform.lock.hcl
+
+crash.log
+crash.log.*
+*.tfplan

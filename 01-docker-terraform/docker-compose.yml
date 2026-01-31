@@ -1,0 +1,67 @@
+services:
+  # --- 1. PostgreSQL Database ---
+  db:
+    image: postgres:16
+    container_name: postgres_db
+    restart: always
+    environment:
+      # Map environment variables from host .env file
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - ./ny_data:/var/lib/postgresql/data  # Persist database data
+    ports:
+      - "${DB_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dtc-net
+
+  # --- 2. Ingestion Application ---
+  app:
+    build:
+      context: .
+      dockerfile: docker_ingestion_pipeline/Dockerfile
+    image: ingestion_pipeline:v1.0.0  # Custom image name & tag
+    container_name: ingestion_app
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env  # Load environment variables from file
+    environment:
+      - DB_HOST=db  # Override DB host to point to service
+    volumes:
+      - ./data:/app/data   # Map runtime data folder
+      - ./logs:/app/logs   # Map logs folder
+    networks:
+      - dtc-net
+
+  # --- 3. Optional pgAdmin (commented out) ---
+  # pgadmin:
+  #   image: dpage/pgadmin4
+  #   container_name: pgadmin
+  #   restart: always
+  #   environment:
+  #     PGADMIN_DEFAULT_EMAIL: admin@admin.com
+  #     PGADMIN_DEFAULT_PASSWORD: root
+  #   ports:
+  #     - "8080:80"
+  #   depends_on:
+  #     - db
+  #   networks:
+  #     - dtc-net
+
+# --- Volumes ---
+volumes:
+  pgdata:
+    driver: local  # Optional named volume for persistent DB storage
+
+# --- Networks ---
+networks:
+  dtc-net:
+    driver: bridge

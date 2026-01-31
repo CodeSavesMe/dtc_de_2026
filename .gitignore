@@ -1,0 +1,22 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / Editor (global)
+.idea/
+.vscode/
+*.swp
+
+# Python (global cache)
+__pycache__/
+*.py[cod]
+
+# Virtual env
+.venv/
+
+# Logs (global)
+*.log
+
+# Environment files (global)
+.env
+.env.*
